@@ -1,5 +1,5 @@
 """
-정부24_대한민국 공공서비스 정보 OpenAPI -> MCP 래퍼 서버
+정부24_대한민국 공공서비스 정보 OpenAPI -> MCP 래퍼 서버 (다중 사용자 지원 버전)
 
 data.go.kr이 제공하는 "대한민국 공공서비스(혜택) 정보"(정부24 gov24 v3, 보조금24
 연계) API를 MCP 도구로 감싼 독립 원격 서버입니다. K-apt(공동주택관리정보)
@@ -7,7 +7,17 @@ data.go.kr이 제공하는 "대한민국 공공서비스(혜택) 정보"(정부2
 
 배포: Render (Web Service, Python)
 전송 방식: Streamable HTTP
-인증: GOV_BENEFITS_SERVICE_KEY 환경변수
+
+인증 방식 [중요 — 이전 버전과 다름]
+------------------------------------
+이 서버는 인증키를 환경변수에 저장하지 않습니다. 대신 Claude 커스텀 커넥터에
+등록하는 URL 자체에 각자의 인증키를 쿼리파라미터로 붙입니다:
+
+    https://<서비스이름>.onrender.com/mcp?api_key=본인이_발급받은_data.go.kr_인증키
+
+이렇게 하면 여러 명(다른 관리사무소장님 등)이 서버 하나를 같이 쓰면서도,
+각자 자기 인증키로 호출됩니다. 서버의 base URL(?api_key= 없는 부분)만
+공개해도 안전합니다 — api_key가 없으면 아무 것도 조회할 수 없습니다.
 
 API 스펙 [확정 — Swagger UI 스크린샷 기준, 2026-08 확인]
 ---------------------------------------------------------
@@ -34,14 +44,10 @@ API 스펙 [확정 — Swagger UI 스크린샷 기준, 2026-08 확인]
 
 import os
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 
-SERVICE_KEY = os.environ.get("GOV_BENEFITS_SERVICE_KEY", "")
 PORT = int(os.environ.get("PORT", 8000))
 BASE_URL = "https://api.odcloud.kr/api"
-
-if not SERVICE_KEY:
-    print("[경고] GOV_BENEFITS_SERVICE_KEY 환경변수가 설정되지 않았습니다. API 호출이 실패합니다.")
 
 mcp = FastMCP(
     name="gov-benefits-info",
@@ -51,18 +57,25 @@ mcp = FastMCP(
 )
 
 
-def _check_key() -> str | None:
-    if not SERVICE_KEY:
-        return (
-            "GOV_BENEFITS_SERVICE_KEY가 서버에 설정되어 있지 않습니다. "
-            "https://www.data.go.kr 마이페이지에서 인증키를 발급받아 Render 환경변수에 등록해주세요."
-        )
-    return None
+def _get_api_key(ctx: Context) -> str | None:
+    """현재 요청 URL의 ?api_key= 쿼리파라미터에서 인증키를 읽어옵니다."""
+    req = ctx.request_context.request
+    if req is None:
+        return None
+    return req.query_params.get("api_key")
 
 
-async def _call(path: str, params: dict) -> str:
+def _missing_key_message() -> str:
+    return (
+        "이 요청에 api_key가 없습니다. Claude 커스텀 커넥터 등록 시 URL을 "
+        "'https://<서비스이름>.onrender.com/mcp?api_key=본인의_data.go.kr_인증키' 형태로 "
+        "입력했는지 확인해주세요. 인증키는 https://www.data.go.kr 마이페이지에서 발급받을 수 있습니다."
+    )
+
+
+async def _call(path: str, params: dict, api_key: str) -> str:
     params = {k: v for k, v in params.items() if v is not None}
-    params["serviceKey"] = SERVICE_KEY
+    params["serviceKey"] = api_key
     async with httpx.AsyncClient(timeout=20.0) as client:
         try:
             resp = await client.get(f"{BASE_URL}{path}", params=params)
@@ -80,6 +93,7 @@ async def _call(path: str, params: dict) -> str:
 
 @mcp.tool()
 async def search_gov_services(
+    ctx: Context,
     keyword: str | None = None,
     agency_name: str | None = None,
     agency_type: str | None = None,
@@ -103,9 +117,9 @@ async def search_gov_services(
         page: 페이지 번호 (기본 1)
         per_page: 페이지당 결과 수 (기본 20)
     """
-    key_error = _check_key()
-    if key_error:
-        return key_error
+    api_key = _get_api_key(ctx)
+    if not api_key:
+        return _missing_key_message()
     params = {"page": page, "perPage": per_page}
     if keyword:
         params["cond[서비스명::LIKE]"] = keyword
@@ -117,11 +131,11 @@ async def search_gov_services(
         params["cond[사용자구분::LIKE]"] = user_type
     if service_field:
         params["cond[서비스분야::LIKE]"] = service_field
-    return await _call("/gov24/v3/serviceList", params)
+    return await _call("/gov24/v3/serviceList", params, api_key)
 
 
 @mcp.tool()
-async def get_gov_service_detail(service_id: str) -> str:
+async def get_gov_service_detail(service_id: str, ctx: Context) -> str:
     """[확정] 특정 공공서비스의 상세내용을 조회합니다.
 
     search_gov_services로 찾은 서비스의 ID를 넣어 상세 설명, 신청 방법, 지원
@@ -131,25 +145,25 @@ async def get_gov_service_detail(service_id: str) -> str:
         service_id: 공공서비스 고유 식별자(서비스ID). search_gov_services 응답의
                     서비스ID 필드값을 그대로 넣으면 됩니다.
     """
-    key_error = _check_key()
-    if key_error:
-        return key_error
+    api_key = _get_api_key(ctx)
+    if not api_key:
+        return _missing_key_message()
     params = {"page": 1, "perPage": 1, "cond[서비스ID::EQ]": service_id}
-    return await _call("/gov24/v3/serviceDetail", params)
+    return await _call("/gov24/v3/serviceDetail", params, api_key)
 
 
 @mcp.tool()
-async def get_gov_service_support_conditions(service_id: str) -> str:
+async def get_gov_service_support_conditions(service_id: str, ctx: Context) -> str:
     """[확정] 특정 공공서비스의 지원조건(자격요건)을 조회합니다.
 
     Args:
         service_id: 공공서비스 고유 식별자(서비스ID)
     """
-    key_error = _check_key()
-    if key_error:
-        return key_error
+    api_key = _get_api_key(ctx)
+    if not api_key:
+        return _missing_key_message()
     params = {"page": 1, "perPage": 1, "cond[서비스ID::EQ]": service_id}
-    return await _call("/gov24/v3/supportConditions", params)
+    return await _call("/gov24/v3/supportConditions", params, api_key)
 
 
 if __name__ == "__main__":

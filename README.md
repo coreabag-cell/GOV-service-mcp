@@ -44,27 +44,34 @@ Swagger UI 스크린샷 3장으로 **3개 엔드포인트 전부 파라미터까
 2. Render → New → Web Service → 레포 선택
    - Build Command: `pip install -r requirements.txt`
    - Start Command: `python server.py`
-3. Environment Variables:
-   - `GOV_BENEFITS_SERVICE_KEY` = 1단계에서 발급받은 인증키
+3. **환경변수는 필요 없습니다** — 인증키는 서버가 아니라 각자의 커넥터
+   등록 URL에서 받습니다.
 
-## 3단계 — Claude 커스텀 커넥터 등록
+## 3단계 — Claude 커스텀 커넥터 등록 [인증 방식 변경]
+
+여러 명(다른 소장님 등)이 서버 하나를 같이 쓸 수 있도록, 인증키를 URL에
+직접 붙이는 방식입니다.
 
 1. Claude.ai → Settings → Connectors → **+ Add custom connector**
 2. Name: `공공서비스 혜택정보` 등
-3. URL: `https://<서비스이름>.onrender.com/mcp`
+3. URL: `https://<서비스이름>.onrender.com/mcp?api_key=본인의_data.go.kr_인증키`
 4. OAuth Client ID/Secret은 비워두세요
+
+**다른 소장님과 같이 쓰시는 경우**: base URL(`.../mcp` 부분, `?api_key=` 제외)만
+공유하세요. 각자 자기 인증키를 붙여서 등록하면 각자의 키로 호출됩니다.
+`?api_key=본인키`가 포함된 전체 URL은 개인 키 노출과 같으니 공유하지 마세요.
 
 ## 로컬 테스트
 
 ```bash
 python -m venv venv
 ./venv/bin/pip install -r requirements.txt
-GOV_BENEFITS_SERVICE_KEY=발급받은키 PORT=8126 ./venv/bin/python server.py
+PORT=8126 ./venv/bin/python server.py
 ```
 
-다른 터미널:
+다른 터미널 (api_key는 URL 쿼리파라미터로):
 ```bash
-curl -N -X POST http://127.0.0.1:8126/mcp/ \
+curl -N -X POST "http://127.0.0.1:8126/mcp/?api_key=발급받은키" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
